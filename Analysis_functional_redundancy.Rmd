@@ -1,0 +1,1663 @@
+---
+title: "R Notebook"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+library(marmap)
+library(tidyverse)
+library(phyloseq)
+library(data.table)
+library(ggrepel)
+library(cowplot)
+```
+
+#Processing
+
+```{r}
+library(data.table)
+library(tidyverse)
+```
+
+```{r}
+setwd("~/Documents/Bioinformatics/SmartIdea/FunEA.analysis/")
+```
+
+```{r}
+library(tidyverse)
+
+# Read all files with extension .TPM_counts.txt
+file_list <- list.files(pattern = "\\.TPM_counts\\.txt$")
+
+annotations.filtered <- readRDS("ko.annotations.rds")
+
+# Initialize an empty list to store data frames
+tpm_data_list <- list()
+
+# Loop through each file and read the data
+for (file in file_list) {
+  # Print the file being processed
+  message("Processing file: ", file)
+  
+  # Read the file into a data frame, check for empty files
+  tpm_data <- tryCatch(
+    read.table(file, header = TRUE, stringsAsFactors = FALSE),
+    error = function(e) {
+      message("Error reading ", file, ": ", e)
+      return(NULL)
+    }
+  )
+  
+  if (!is.null(tpm_data)) {
+    # Ensure SampleID column is not missing
+    if (!"SampleID" %in% colnames(tpm_data)) {
+      message("Warning: 'SampleID' column missing in ", file)
+      next
+    }
+    
+    # Select the desired columns and remove rows with missing values
+    tpm_data <- tpm_data %>%
+      select(GeneID, SampleID, TPM)
+ 
+    tpm_data.annotated <- left_join(tpm_data, annotations.filtered, by = c("GeneID" = "query"))
+
+    tpm_data.annotated.summarised <- tpm_data.annotated %>% group_by(KEGG, SampleID) %>% summarise(TPM = sum(TPM))   
+    
+    # Append the data frame to the list
+    tpm_data_list[[file]] <- tpm_data.annotated.summarised
+  }
+}
+
+# Combine all data frames into one
+combined_tpm_data <- bind_rows(tpm_data_list)
+
+# Pivot the data wider, making each SampleID a column
+wide_tpm_data <- combined_tpm_data %>%
+  pivot_wider(
+    names_from = SampleID,
+    values_from = TPM,
+    values_fill = list(TPM = 0)  # Fill missing values with 0
+  )
+
+# View the resulting data frame
+print(wide_tpm_data)
+
+# Optionally save the result to a new file
+write.csv(wide_tpm_data, "Combined_TPM_Wide.csv", row.names = FALSE)
+```
+
+#KEGG Loading
+
+```{r}
+
+TPM.results.wide <- read.csv("Combined_TPM_Wide.csv") 
+
+```
+
+```{r}
+TPM.results.wide <- data.frame(TPM.results.wide)
+
+TPM.results.wide[is.na(TPM.results.wide)] <- 0
+
+rownames(TPM.results.wide) <- TPM.results.wide$KEGG
+
+TPM.results.wide <- TPM.results.wide %>% select(-KEGG)
+
+TPM.results.wide.mat <- as.matrix(TPM.results.wide)
+
+metadata <- read.csv("FunEA.metadata.csv", h=T, row.names = 1)
+
+
+taxa <- data.frame(rownames(TPM.results.wide))
+
+colnames(taxa) <-"KEGG_ko"
+
+rownames(taxa) <- taxa$KEGG_ko
+
+taxa$KEGG_ko <- gsub("ko:", "", taxa$KEGG_ko)
+
+taxa.mat <- as.matrix(taxa)
+
+ps <- phyloseq(otu_table(TPM.results.wide.mat, taxa_are_rows=TRUE),
+                                  sample_data(metadata),
+               tax_table(taxa.mat))
+
+ps <- subset_samples(ps, Region != "Chatham Islands")
+
+ps <- subset_samples(ps, Lake.Code != "46484")
+ps <- subset_samples(ps, Lake.Code != "46493")
+ps <- subset_samples(ps, Lake.Code != "46496")
+ps <- subset_samples(ps, Lake.Code != "46494")
+ps <- subset_samples(ps, Lake.Code != "L380.2")
+ps <- subset_samples(ps, Lake.Code != "L380.3")
+ps <- subset_samples(ps, Lake.Code != "L380.4")
+
+```
+
+```{r}
+kegg.pathway <- read.csv("ko.kegg.csv", h=T)
+
+kegg.pathway.metabolism <- kegg.pathway %>% filter(Rank1 == "Metabolism" | Rank2 == "Protein families: metabolism")
+
+kegg.pathway.metabolism$KO <- gsub("K", "ko:K", kegg.pathway.metabolism$KO)
+
+metabolism.ko <- unique(kegg.pathway.metabolism$KO)
+
+metabolism_ps <- prune_taxa(taxa_names(ps) %in% metabolism.ko, ps)
+
+```
+
+
+#Mantel
+
+```{r}
+Lakes380.ss.subtract.cleaned.merged <- readRDS("~/Documents/Bioinformatics/Lakes380/DNA/SurfaceSediment/SurfaceSed/Lakes380.ss.subtract.cleaned.merged.rds") 
+
+
+tax.clean <- data.frame(tax_table(Lakes380.ss.subtract.cleaned.merged))
+
+for (i in 1:6){ tax.clean[,i] <- as.character(tax.clean[,i])}
+
+tax.clean[is.na(tax.clean)] <- ""
+
+for (i in 1:nrow(tax.clean)){
+  if (tax.clean[i,2] == ""){
+    kingdom <- paste("Unclassified_Kingdom_", tax.clean[i,1], sep = "")
+    tax.clean[i, 2:6] <- kingdom
+  } else if (tax.clean[i,3] == ""){
+    phylum <- paste("Unclassified_Phylum_", tax.clean[i,2], sep = "")
+    tax.clean[i, 3:6] <- phylum
+  } else if (tax.clean[i,4] == ""){
+    class <- paste("Unclassified_Class_", tax.clean[i,3], sep = "")
+    tax.clean[i, 4:6] <- class
+  } else if (tax.clean[i,5] == ""){
+    order <- paste("Unclassified_Order_", tax.clean[i,4], sep = "")
+    tax.clean[i, 5:6] <- order
+  } else if (tax.clean[i,6] == ""){
+    tax.clean$Genus[i] <- paste("Unclassified_Family",tax.clean$Family[i], sep = "_")
+  } 
+}
+
+tax_table(Lakes380.ss.subtract.cleaned.merged) <- as.matrix(tax.clean)
+
+
+Lakes380.ss.subtract.cleaned.merged <- subset_taxa(Lakes380.ss.subtract.cleaned.merged, Phylum != "Unclassified_Kingdom_Archaea")
+
+Lakes380.ss.subtract.cleaned.merged <- subset_taxa(Lakes380.ss.subtract.cleaned.merged, Phylum != "Unclassified_Kingdom_Bacteria")
+```
+
+```{r}
+ss <- as.data.frame(sample_sums(Lakes380.ss.subtract.cleaned.merged))
+
+
+Lakes380.ss.subtract.cleaned.merged.pruned <- prune_samples(sample_sums(Lakes380.ss.subtract.cleaned.merged)>12500, Lakes380.ss.subtract.cleaned.merged)
+
+Lakes380.ss.subtract.cleaned.merged.pruned.rare <- rarefy_even_depth(Lakes380.ss.subtract.cleaned.merged.pruned, sample.size = min(sample_sums(Lakes380.ss.subtract.cleaned.merged.pruned)), 
+                                      replace = FALSE, trimOTUs = TRUE, rngseed = 81, verbose = TRUE)
+```
+
+
+```{r}
+ps.merged <- merge_samples(ps, "Lake.Code")
+
+sd <- data.frame(sample_data(ps.merged))
+
+sd$SBTI_Troph <- "State Unknown"
+sd$SBTI_Troph[sd$SBTI <8] <- "Hypertrophic"
+sd$SBTI_Troph[sd$SBTI <6] <- "Supertrophic"
+sd$SBTI_Troph[sd$SBTI <5] <- "Eutrophic"
+sd$SBTI_Troph[sd$SBTI <4] <- "Mesotrophic"
+sd$SBTI_Troph[sd$SBTI <3] <- "Oligotrophic"
+sd$SBTI_Troph[sd$SBTI <2] <- "Microtrophic"
+
+
+sample_data(ps.merged) <- sd
+```
+
+
+```{r}
+shared_samples <- intersect(sample_names(Lakes380.ss.subtract.cleaned.merged.pruned.rare), sample_names(ps.merged))
+
+# Filter both objects to only include those samples
+ps.taxonomy_common <- prune_samples(shared_samples, Lakes380.ss.subtract.cleaned.merged.pruned.rare)
+ps.function_common <- prune_samples(shared_samples, ps.merged)
+
+ps.function_common <- prune_taxa(taxa_sums(ps.function_common) > 0, ps.function_common)
+ps.taxonomy_common <- prune_taxa(taxa_sums(ps.taxonomy_common) > 0, ps.taxonomy_common)
+
+
+ps.function_common_hell <- transform_sample_counts(ps.function_common, function(x) sqrt(x / sum(x)))
+ps.taxonomy_common_hell <- transform_sample_counts(ps.taxonomy_common, function(x) sqrt(x / sum(x)))
+
+
+ps.function_common.bray <- phyloseq::distance(ps.function_common_hell, method="bray")
+ps.taxonomy_common.bray <- phyloseq::distance(ps.taxonomy_common_hell, method="bray")
+
+mantel(ps.function_common.bray, ps.taxonomy_common.bray, permutations=999, method = "spearman") 
+
+```
+
+#Figure 1
+
+```{r}
+getNOAA.bathy(lon1=165.5,lon2=179,lat1=-48,lat2=-34, resolution=1, keep = T) -> NZ
+
+
+NZ.p <- autoplot.bathy(NZ, geom=c("contour", "raster"), colour="white", size=0.1, show.legend = FALSE) +
+  scale_fill_gradient2(low="#FFFFFF", mid="#FFFFFF", high="#a19f9c") +
+  theme(axis.title=element_blank(),
+        axis.text=element_blank(),
+        axis.ticks=element_blank(), 
+        legend.position.inside = c(0.7, 0.7)) 
+
+ps.map <- subset_samples(ps, Lake.Code != "L380.2")
+ps.map <- subset_samples(ps.map, Lake.Code != "L380.3")
+ps.map <- subset_samples(ps.map, Lake.Code != "L380.4")
+
+
+sd <- data.frame(sample_data(ps.map))
+
+sd.main <- sd %>% filter(Region != "Chatham Islands")
+
+sd.main$SBTI_Troph[sd.main$SBTI_Troph == "Microtrophic"] <- "Oligotrophic"
+sd.main$SBTI_Troph[sd.main$SBTI_Troph == "Hypertrophic"] <- "Supertrophic"
+  
+sd.main$SBTI_Troph <- factor(sd.main$SBTI_Troph, 
+                                  levels=c("Oligotrophic", "Mesotrophic", "Eutrophic", "Supertrophic"))
+
+map_plot <- NZ.p +
+  geom_point(data = sd.main, aes(y = Latitude, x = Longitude, colour = SBTI_Troph), size = 3) +
+  scale_colour_manual(values = c("#267f01", "#fec33a", "#d35b18", "#f8260d"),
+                      name = "Trophic level") +
+  theme_classic() +
+  theme(
+    axis.text = element_text(size = 20),
+    axis.title = element_text(size = 20),
+    plot.title = element_text(size = 22),
+    axis.ticks = element_blank(),
+    panel.background = element_rect(fill = "transparent"),
+    panel.grid = element_blank(),
+    plot.background = element_rect(fill = "transparent", colour = NA),
+    legend.position = "none",  # remove default legend
+    plot.margin = unit(c(0,0,0,0), "cm")
+  ) + ggtitle("A") +
+  xlab("Longitude") + 
+  ylab("Latitude")
+
+library(cowplot)
+# ---- Create legend grob ----
+legend_grob <- get_legend(
+  ggplot(sd.main, aes(x = Longitude, y = Latitude, colour = SBTI_Troph)) +
+    geom_point() +
+    scale_colour_manual(values = c("#267f01", "#fec33a", "#d35b18", "#f8260d"),
+                        name = "Trophic level") +
+    theme(
+      legend.background = element_rect(fill = alpha("white", 0.6), colour = NA),
+      legend.key = element_rect(fill = NA, colour = NA),
+      legend.title = element_blank(),
+      legend.text = element_text(size = 16)
+    )
+)
+
+legend <- get_legend(
+  ggplot(sd.main, aes(x = Longitude, y = Latitude, colour = SBTI_Troph)) +
+    geom_point() +
+    scale_colour_manual(values = c("#267f01", "#fec33a", "#d35b18", "#f8260d"),
+                        name = "Trophic level") +
+    theme(legend.background = element_blank(),
+          legend.key = element_rect(fill = NA, colour = NA),
+      legend.title = element_blank(),
+      legend.text = element_text(size = 20))
+)
+
+# Place legend manually inside the plot
+map_with_legend <- ggdraw(map_plot) +
+  draw_grob(legend, x = 0.3, y = 0.6, width = 0.25, height = 0.25)
+```
+
+
+```{r}
+sample_data(ps)$Forestry <- sample_data(ps)$For_Harv + sample_data(ps)$Exot_For
+ 
+sample_data(ps)$Native <- sample_data(ps)$Alpine_Gra + 
+                                               sample_data(ps)$Indi_Hard + 
+                                               sample_data(ps)$Fernland +
+                                               sample_data(ps)$Flaxland + 
+                                               sample_data(ps)$Indi_For + 
+                                               sample_data(ps)$Manuka +
+                                               sample_data(ps)$Matagouri + 
+                                               sample_data(ps)$Sub_Alp_Sh + 
+                                               sample_data(ps)$Tussock
+
+sample_data(ps)$Urban <- sample_data(ps)$Built_up + 
+                                               sample_data(ps)$Trans_Infr + 
+                                               sample_data(ps)$Parkland 
+                                               
+sample_data(ps)$Non.Native <- sample_data(ps)$Decid_Hard + 
+                                               sample_data(ps)$Dep_Grass + 
+                                               sample_data(ps)$Gorse +
+                                               sample_data(ps)$Mixed_Exo + 
+                                               sample_data(ps)$Orchard + 
+                                               sample_data(ps)$Short_rot
+
+sample_data(ps)$Water <- sample_data(ps)$Estu_Wat + 
+                                               sample_data(ps)$River
+
+sample_data(ps)$Other <- sample_data(ps)$Gravel + 
+                                               sample_data(ps)$Herb_FW_Ve + 
+                                               sample_data(ps)$Herb_Sal_V +
+                                               sample_data(ps)$Landslide + 
+                                               sample_data(ps)$Per_Snow + 
+                                               sample_data(ps)$Sand +
+                                               sample_data(ps)$Mine
+```
+
+```{r}
+
+ps.pca <- subset_samples(ps, Lake.Code != "L380.2")
+ps.pca <- subset_samples(ps.pca, Lake.Code != "L380.3")
+ps.pca <- subset_samples(ps.pca, Lake.Code != "L380.4")
+
+sd <- data.frame(sample_data(ps.pca))
+
+
+sd1 <- sd %>% 
+  dplyr::select(SBTI, BulS.TN, BulS.OM, BulS.TOC, BulS.Phosphorus, BulS.Sulfur, High_Prod, TN.TP)
+
+h_detect_lim <- function(var) {
+  var <- as.character(var)
+  isLimit <- grepl("<", var)
+  var[isLimit] <- as.numeric(gsub("<(.*)", "\\1", var[isLimit])) / 2
+  as.numeric(var)
+}
+
+
+
+map16Sheaders <- as.data.frame(colnames(sd1))
+
+colnames(map16Sheaders) <- "Var"
+
+library(caret)
+
+sd.cleaned <- 
+  sd1 %>%
+  mutate(across(BulS.TN:last_col(), ~ as.numeric(str_replace_all(., "[^0-9.-]", "")))) %>% 
+  mutate(across(BulS.TN:last_col(), ~ str_replace_all(., "No results", "")), # replace "No results" 
+         across(BulS.TN:last_col(), ~ str_replace_all(., "Not tested", ""))) %>% # replace "Not tested" 
+  mutate_at(vars(map16Sheaders$Var,), h_detect_lim)  %>%
+  mutate(across(BulS.TN:last_col(), ~as.numeric(.)))
+
+
+sd2 <-
+  preProcess(sd.cleaned,
+             method = c("center", "scale", "YeoJohnson", "corr", "bagImpute"))
+sd3 <- 
+  predict(sd2, sd.cleaned)
+
+colnames(sd3) <- c("SBTI", "TN", "TOC", "TP", "S", "HPG", "TN.TP")
+
+pca_res <- prcomp(sd3, scale. = TRUE)
+
+sd3$LID <- rownames(sd3)
+
+sd3$Trophic.State <- sd$SBTI_Troph
+
+sd3$Trophic.State[sd3$Trophic.State == "Microtrophic"] <- "Oligotrophic"
+sd3$Trophic.State[sd3$Trophic.State == "Hypertrophic"] <- "Supertrophic"
+  
+  
+sd3$Trophic.State <- factor(sd3$Trophic.State, 
+                                  levels=c("Oligotrophic", "Mesotrophic", "Eutrophic", "Supertrophic"))
+
+
+library(ggfortify)
+
+pca.plot = autoplot(pca_res, data = sd3, colour="Trophic.State", size=2,
+         loadings = TRUE, loadings.colour = 'grey45',
+         loadings.label = TRUE, loadings.label.repel = TRUE, loadings.label.size = 6.5, loadings.label.colour="black", loadings.label.vjust = -1.05, loadings.label.repel.max.overlaps = 10, # allow more overlap processing
+  loadings.label.repel.box.padding = 1.5, # more spacing between labels
+  loadings.label.repel.point.padding = 1.3,
+  loadings.label.repel.segment.size = 1.3) 
+
+
+
+
+base_plot <- autoplot(pca_res, data = sd3, colour = "Trophic.State", size = 3, loadings = FALSE) +
+  theme_classic() +
+  scale_colour_manual(values = c("#267f01", "#fec33a", "#d35b18", "#f8260d"), name = "Trophic level") +
+  theme(
+    axis.text = element_text(size = 20),
+    axis.title = element_text(size = 20),
+    plot.title = element_text(size = 22),
+    axis.ticks = element_blank(),
+    panel.background = element_rect(fill = "transparent"),
+    panel.grid = element_blank(),
+    plot.background = element_rect(fill = "transparent", colour = NA),
+    legend.position = "none",  # remove default legend
+    plot.margin = unit(c(0,0,0,0), "cm")
+  ) + ggtitle("B")
+
+loadings <- data.frame(pca_res$rotation[, 1:2])
+loadings$var <- rownames(loadings)
+
+pca.plot <- base_plot +
+  geom_segment(data = loadings,
+               aes(x = 0, y = 0, xend = PC1 * 0.3, yend = PC2 * 0.3),
+               arrow = arrow(length = unit(0.2, "cm")), colour = "grey45") +
+  geom_text_repel(data = loadings,
+                  aes(x = PC1 * 0.335, y = PC2 * 0.335, label = var),
+                  size = 6.5, colour = "black", max.overlaps = 50)
+
+
+
+
+ggsave(file="PCA_enviroplot.jpeg", width=6.5, height=5, units = "in", bg="transparent")
+pca.plot
+dev.off()
+
+
+```
+
+
+#Figure 1
+
+```{r}
+library(grid)
+map_grob <- ggplotGrob(map_with_legend)
+pca_grob <- ggplotGrob(pca.plot)
+
+# Align panel heights
+panel_map <- map_grob$heights[map_grob$layout[map_grob$layout$name == "panel", "t"]]
+panel_pca <- pca_grob$heights[pca_grob$layout[pca_grob$layout$name == "panel", "t"]]
+
+max_panel_height <- unit.pmax(panel_map, panel_pca)
+
+map_grob$heights[map_grob$layout[map_grob$layout$name == "panel", "t"]] <- max_panel_height
+pca_grob$heights[pca_grob$layout[pca_grob$layout$name == "panel", "t"]] <- max_panel_height
+
+# Arrange side by side
+combined_plot <- grid.arrange(map_grob, pca_grob, ncol = 2, widths = c(1, 1))
+
+ggsave("FunEA_map_PCA_aligned.jpeg", combined_plot, width = 15, height = 9, units = "in", bg = "transparent")
+
+```
+
+
+#Figure 2
+
+```{r}
+
+library(Rtsne)
+library(vegan)
+
+set.seed(118)
+method <- "tsne"
+trans <- "hellinger"
+distance <- "bray"
+
+ps.tsne <- subset_samples(ps, Lake.Code != "L380.2")
+ps.tsne <- subset_samples(ps.tsne, Lake.Code != "L380.3")
+ps.tsne <- subset_samples(ps.tsne, Lake.Code != "L380.4")
+
+ps.rtsne <- microbiome::transform(ps.tsne, trans)
+dm <- vegdist(t(otu_table(ps.rtsne)), distance)
+tsne_out <- Rtsne(dm, dims = 2, perplexity = 55) 
+proj <- tsne_out$Y
+rownames(proj) <- rownames(t(otu_table(ps.tsne)))
+
+proj <- data.frame(proj)
+
+proj$SampleID <- rownames(proj)
+
+sd <- data.frame(sample_data(ps.tsne))
+
+sd$SampleID2 <- rownames(sd)
+
+proj <- left_join(proj, sd, by = c("SampleID" = "SampleID2"))
+
+proj$SBTI_Troph[proj$SBTI_Troph == "Microtrophic"] <- "Oligotrophic"
+proj$SBTI_Troph[proj$SBTI_Troph == "Hypertrophic"] <- "Supertrophic"
+
+proj$SBTI_Troph <- factor(proj$SBTI_Troph, levels = c("Oligotrophic", "Mesotrophic", "Eutrophic", "Supertrophic"))
+
+
+
+MV_plot_final <- ggplot() +
+  geom_point(data=proj, aes(x= X1, y=X2, col= SBTI_Troph)) +
+  theme_classic() + 
+  scale_color_manual(values=c("Oligotrophic" = "#267f01", "Mesotrophic" = "#fec33a", "Eutrophic" = "#d35b18", "Supertrophic" = "#f8260d"), name = "Trophic level") +
+  ylab("PC2") +
+  xlab("PC1") +
+  ggtitle("A") +
+  theme(legend.title=element_text(size=12, color="black")) + 
+  theme(axis.title= element_text(size=12, color="black")) + 
+  theme(legend.text=element_text(size=12, color="black")) + 
+  theme(axis.text.y= element_text(size=12, color="black")) +
+  theme(plot.title = element_text(size=14)) +
+  theme(axis.text.x= element_text(size=12, color="black")) 
+
+
+
+ggsave(file="MV_SBTI.jpeg", width=6, height=4, units = "in", bg="transparent")
+MV_plot_final
+dev.off()
+
+```
+
+```{r}
+
+sd <- data.frame(sample_data(ps.tsne))
+
+attach(sd)
+
+adonis.res <- adonis2(dm ~ SBTI_Troph, data=sd, permutations=999)
+
+
+```
+
+
+
+
+```{r}
+
+FunEA.selected.genes.tab <- readRDS("FunEA.selected.genes.tab.updated.rds")
+
+
+genus_family_lookup <- FunEA.selected.genes.tab[!is.na(FunEA.selected.genes.tab$family) & !is.na(FunEA.selected.genes.tab$genus), ]
+
+lookup <- unique(genus_family_lookup[, c("genus", "family")])
+
+FunEA.selected.genes.tab$family <- ifelse(
+  is.na(FunEA.selected.genes.tab$family) & !is.na(FunEA.selected.genes.tab$genus),
+  lookup$family[match(FunEA.selected.genes.tab$genus, lookup$genus)],
+  FunEA.selected.genes.tab$family
+)
+
+
+family_order_lookup <- FunEA.selected.genes.tab[!is.na(FunEA.selected.genes.tab$order) & !is.na(FunEA.selected.genes.tab$family), ]
+
+lookup <- unique(family_order_lookup[, c("family", "order")])
+
+FunEA.selected.genes.tab$order <- ifelse(
+  is.na(FunEA.selected.genes.tab$order) & !is.na(FunEA.selected.genes.tab$family),
+  lookup$order[match(FunEA.selected.genes.tab$family, lookup$family)],
+  FunEA.selected.genes.tab$order
+)
+
+order_class_lookup <- FunEA.selected.genes.tab[!is.na(FunEA.selected.genes.tab$class) & !is.na(FunEA.selected.genes.tab$order), ]
+
+lookup <- unique(order_class_lookup[, c("order", "class")])
+
+FunEA.selected.genes.tab$class <- ifelse(
+  is.na(FunEA.selected.genes.tab$class) & !is.na(FunEA.selected.genes.tab$order),
+  lookup$class[match(FunEA.selected.genes.tab$order, lookup$order)],
+  FunEA.selected.genes.tab$class
+)
+
+
+class_phylum_lookup <- FunEA.selected.genes.tab[!is.na(FunEA.selected.genes.tab$phylum) & !is.na(FunEA.selected.genes.tab$class), ]
+
+lookup <- unique(class_phylum_lookup[, c("class", "phylum")])
+
+FunEA.selected.genes.tab$phylum <- ifelse(
+  is.na(FunEA.selected.genes.tab$phylum) & !is.na(FunEA.selected.genes.tab$class),
+  lookup$phylum[match(FunEA.selected.genes.tab$class, lookup$class)],
+  FunEA.selected.genes.tab$phylum
+)
+
+
+FunEA.selected.genes.tab$class <- ifelse(
+  is.na(FunEA.selected.genes.tab$class) & !is.na(FunEA.selected.genes.tab$phylum),
+  paste0("Unclassified_", FunEA.selected.genes.tab$phylum),
+  FunEA.selected.genes.tab$class
+)
+
+
+
+FunEA.selected.genes.tab <- FunEA.selected.genes.tab %>% select(-ContigID, -domain, -order, -family, -genus,
+                                                                -seed_ortholog, -evalue, -score, -eggNOG_OGs, -max_annot_lvl, -COG_category, 
+                                                                -Description, -Preferred_name, -GOs, -EC, -PFAMs, -KEGG_Pathway,
+                                                                -KEGG_Module, -KEGG_Reaction, -KEGG_rclass, -BRITE, -KEGG_TC, -CAZy, -BiGG_Reaction)
+
+
+FunEA.selected.genes.tab.filtered <- FunEA.selected.genes.tab %>%
+  mutate(Function = case_when(grepl("K01601", KEGG_ko) ~ "Calvin cycle",
+                                            grepl("K15230", KEGG_ko) ~ "rTCA cycle",
+                                            grepl("K15231", KEGG_ko) ~ "rTCA cycle",
+                                            grepl("K15233", KEGG_ko) ~ "rTCA cycle",
+                                            grepl("K15234", KEGG_ko) ~ "rTCA cycle",
+                                            grepl("K02274", KEGG_ko) ~ "Respiration",
+                                            grepl("K02276", KEGG_ko) ~ "Respiration",
+                                            grepl("K00401", KEGG_ko) ~ "Methanogenesis",
+                                            grepl("K14138", KEGG_ko) ~ "WL",
+                              grepl("K02704", KEGG_ko) ~ "Photosynthesis",
+                              grepl("K02586", KEGG_ko) ~ "N fixation",
+                              grepl("K02588", KEGG_ko) ~ "N fixation",
+                              grepl("K02591", KEGG_ko) ~ "N fixation",
+                              grepl("K00376", KEGG_ko) ~ "Denitrification",
+                              grepl("K03385", KEGG_ko) ~ "DNRA",
+                              grepl("K00372", KEGG_ko) ~ "ANR",
+                              grepl("K00367", KEGG_ko) ~ "ANR",
+                              grepl("K10535", KEGG_ko) ~ "Nitrification",
+                              grepl("K02036", KEGG_ko) ~ "P transport",
+                              grepl("K02037", KEGG_ko) ~ "P transport",
+                              grepl("K02038", KEGG_ko) ~ "P transport",
+                              grepl("K02040", KEGG_ko) ~ "P transport",
+                              grepl("K00394", KEGG_ko) ~ "DSR",
+                                            grepl("K00395", KEGG_ko) ~ "DSR",
+                                            grepl("K11180", KEGG_ko) ~ "DSR",
+                                            grepl("K11181", KEGG_ko) ~ "DSR",
+                                            grepl("K00860", KEGG_ko) ~ "ASR",
+                                            grepl("K00956", KEGG_ko) ~ "ASR",
+                                            grepl("K17224", KEGG_ko) ~ "SOX")) %>% 
+  filter(!is.na(Function)) %>%
+  mutate(Function2 = case_when(grepl("K01601", KEGG_ko) ~ "Carbon",
+                                            grepl("K15230", KEGG_ko) ~ "Carbon",
+                                            grepl("K15231", KEGG_ko) ~ "Carbon",
+                                            grepl("K15233", KEGG_ko) ~ "Carbon",
+                                            grepl("K15234", KEGG_ko) ~ "Carbon",
+                                            grepl("K02274", KEGG_ko) ~ "Carbon",
+                                            grepl("K02276", KEGG_ko) ~ "Carbon",
+                                            grepl("K00401", KEGG_ko) ~ "Carbon",
+                                            grepl("K14138", KEGG_ko) ~ "Carbon",
+                              grepl("K02704", KEGG_ko) ~ "Carbon",
+                              grepl("K02586", KEGG_ko) ~ "Nitrogen",
+                              grepl("K02588", KEGG_ko) ~ "Nitrogen",
+                              grepl("K02591", KEGG_ko) ~ "Nitrogen",
+                              grepl("K00376", KEGG_ko) ~ "Nitrogen",
+                              grepl("K03385", KEGG_ko) ~ "Nitrogen",
+                              grepl("K00372", KEGG_ko) ~ "Nitrogen",
+                              grepl("K00367", KEGG_ko) ~ "Nitrogen",
+                              grepl("K10535", KEGG_ko) ~ "Nitrogen",
+                              grepl("K02036", KEGG_ko) ~ "Phosphorus",
+                              grepl("K02037", KEGG_ko) ~ "Phosphorus",
+                              grepl("K02038", KEGG_ko) ~ "Phosphorus",
+                              grepl("K02040", KEGG_ko) ~ "Phosphorus",
+                              grepl("K00394", KEGG_ko) ~ "Sulfur",
+                                            grepl("K00395", KEGG_ko) ~ "Sulfur",
+                                            grepl("K11180", KEGG_ko) ~ "Sulfur",
+                                            grepl("K11181", KEGG_ko) ~ "Sulfur",
+                                            grepl("K00860", KEGG_ko) ~ "Sulfur",
+                                            grepl("K00956", KEGG_ko) ~ "Sulfur",
+                                            grepl("K17224", KEGG_ko) ~ "Sulfur"))
+
+
+FunEA.selected.genes.tab.filtered.longer <- pivot_longer(data = FunEA.selected.genes.tab.filtered, cols = Camp.1.LCH5450_combined:Peel.B.LGH14840_L1, names_to = "SampleID", values_to = "CPM") %>%
+  filter(SampleID != "L380.10.r1.LGD5260_L1") %>%
+  filter(SampleID != "L380.10.r2.LGD5261_L1") %>%
+  filter(SampleID != "L380.10.r3.LGD5262_L1") %>%
+  filter(SampleID != "L380.13.r1.LGD5266_L1") %>%
+  filter(SampleID != "L380.13.r2.LGD5267_L1") %>%
+  filter(SampleID != "L380.13.r3.LGD5268_L1") %>%
+  filter(SampleID != "L380.6.r1.LGD5269_L1") %>%
+  filter(SampleID != "L380.6.r2.LGD5270_L1") %>%
+  filter(SampleID != "L380.6.r3.LGD5271_L1") %>%
+  filter(SampleID != "L380.7.r1.LGD5272_L1") %>%
+  filter(SampleID != "L380.7.r2.LGD5273_L1") %>%
+  filter(SampleID != "L380.7.r3.LGD5274_L1") %>%
+  filter(SampleID != "L380.8.r1.LGD5275_L1") %>%
+  filter(SampleID != "L380.8.r2.LGD5276_L1") %>%
+  filter(SampleID != "L380.8.r3.LGD5277_L1") %>%
+  filter(SampleID != "L380.12.R1.LGE5867_L2") %>%
+  filter(SampleID != "L380.12.R2.LGE5868_L2") %>%
+  filter(SampleID != "L380.12.R3.LGE5869_L2") %>%
+  filter(SampleID != "L46484.r1.LGD5185_L1") %>%
+  filter(SampleID != "L46484.r2.LGD5186_L1") %>%
+  filter(SampleID != "L46484.r3.LGD5187_L1") %>%
+  filter(SampleID != "L46493.r1.LGD5188_L1") %>%
+  filter(SampleID != "L46493.r2.LGD5189_L7") %>%
+  filter(SampleID != "L46493.r3.LGD5190_L7") %>%
+  filter(SampleID != "L46494.r1.LGD5191_L7") %>%
+  filter(SampleID != "L46494.r2.LGD5192_L7") %>%
+  filter(SampleID != "L46494.r3.LGD5193_L7") %>%
+  filter(SampleID != "L46496.r1.LGD5194_L7") %>%
+  filter(SampleID != "L46496.r2.LGD5195_L7") %>%
+  filter(SampleID != "L46496.r3.LGD5196_L7") %>%
+  filter(SampleID != "L380.2.r1.LGC13774_L1") %>%
+  filter(SampleID != "L380.2.r2.LGC13775_L1") %>%
+  filter(SampleID != "L380.2.r3.LGC13776_L1") %>%
+  filter(SampleID != "L380.3.r1.LGC13777.RL3_L1") %>%
+  filter(SampleID != "L380.3.r2.LGC13778_L2") %>%
+  filter(SampleID != "L380.3.r3.LGC13779_L2") %>%
+  filter(SampleID != "L380.4.LGD5256_L2") 
+
+
+FunEA.selected.genes.tab.filtered.longer.summary <- FunEA.selected.genes.tab.filtered.longer %>% 
+  group_by(Function, SampleID) %>%
+  summarise(CPM = sum(CPM))
+
+
+metadata <- read.csv("FunEA.metadata.csv")
+
+metadata.filtered <- metadata %>% select(Sample, High_Prod, BulS.TOC, BulS.TN, BulS.Phosphorus, TN.TP, BulS.Sulfur, BulS.OM, SBTI)
+
+FunEA.selected.genes.tab.filtered.longer.summary <- left_join(FunEA.selected.genes.tab.filtered.longer.summary, metadata.filtered, by = c("SampleID" = "Sample"))
+
+```
+
+```{r}
+
+gene.list <- unique(FunEA.selected.genes.tab.filtered.longer.summary$Function)
+
+env.list <- c( "High_Prod", "BulS.TOC", "BulS.TN", "BulS.Phosphorus", "TN.TP", "BulS.Sulfur", "BulS.OM", "SBTI")
+
+correlation.table <- NULL;
+
+for (j in seq_along(env.list)){
+   print(env.list[j])
+  for (i in seq_along(gene.list)) {
+  print(gene.list[i])
+  filtered.tab = FunEA.selected.genes.tab.filtered.longer.summary[which(FunEA.selected.genes.tab.filtered.longer.summary$Function == gene.list[i]), ]
+  cor.res <- cor.test(filtered.tab$CPM, filtered.tab[[env.list[j]]], method="spearman")
+  cor.res.r=data.frame(cor.res$estimate)
+  cor.res.P=data.frame(cor.res$p.value)
+   cor.res.combined <- data.frame(
+      Gene = gene.list[i],
+      Correlation = cor.res.r,
+      PValue = cor.res.P,
+      EnvVar = env.list[j]
+    )
+  correlation.table <- rbind(correlation.table, cor.res.combined)
+  }
+}
+  
+colnames(correlation.table) <- c("Function", "Rvalue", "P", "env")
+
+correlation.table$P.adjust <- p.adjust(correlation.table$P, "BH")
+
+correlation.table["Correlation"] <- "NS"
+correlation.table$Correlation[correlation.table$R > 0 & correlation.table$P.adjust < 0.05] <- "Positive"
+correlation.table$Correlation[correlation.table$R < 0 & correlation.table$P.adjust < 0.05] <- "Negative"
+correlation.table$Function <- as.character(correlation.table$Function)
+correlation.table$env <- as.character(correlation.table$env)
+
+```
+
+```{r}
+correlation.table <- as.data.frame(correlation.table)
+
+correlation.table$Rvalue  <- as.numeric(correlation.table$Rvalue)
+
+correlation.table <- data.table(correlation.table)
+
+correlation.table <- correlation.table[env == "BulS.TN", env := "TN"]
+correlation.table <- correlation.table[env == "BulS.Phosphorus", env := "TP"]
+correlation.table <- correlation.table[env == "TN.TP", env := "TN:TP"]
+correlation.table <- correlation.table[env == "BulS.TOC", env := "TOC"]
+correlation.table <- correlation.table[env == "High_Prod", env := "HPG"]
+correlation.table <- correlation.table[env == "BulS.OM", env := "OM"]
+correlation.table <- correlation.table[env == "BulS.Sulfur", env := "S"]
+correlation.table <- correlation.table[env == "SBTI", env := "SBTI"]
+
+correlation.table$Correlation = factor(correlation.table$Correlation, levels = c("Positive",
+                                                                                     "Negative",
+                                                                                     "NS"))
+
+correlation.table$Function = factor(correlation.table$Function, levels = c("Photosynthesis", "Calvin cycle", "rTCA cycle", "WL", "Respiration", "Methanogenesis", 
+                                                                                       "ANR", "DNRA", "Denitrification", "Nitrification", "N fixation", "P transport",
+                                                                                       "ASR", "DSR", "SOX"))
+
+correlation.table$env = factor(correlation.table$env, levels = c("SBTI", "HPG", "TOC", "OM", "TN", "TP", "TN:TP", "S"))
+
+heatmap.correlation <- ggplot(correlation.table, aes(env, Function)) +  
+  theme_void() + 
+  geom_tile(aes(fill = Rvalue), color = "white") +
+  scale_fill_gradient2(low = "#ffce7a", mid="white", high = "#6a89a7", limits=c(-1,1)) + 
+  ylab("") +
+  xlab("") + 
+  guides(fill=guide_legend(title="Correlation"), shape=guide_legend(title="")) + 
+  theme(axis.title = element_blank())  + 
+  geom_text(
+  data = subset(correlation.table, Correlation == "Negative"),
+  aes(label = "\u2212"),        # true minus sign
+  size = 5,                     # bigger = thicker
+  fontface = "bold",            # bold stroke
+  color = "black") +
+  geom_text(
+  data = subset(correlation.table, Correlation == "Positive"),
+  aes(label = "+"),
+  size = 5,
+  fontface = "bold",
+  color = "black") + 
+  theme(legend.title=element_text(size=12, color="black")) + 
+  theme(axis.title= element_text(size=12, color="black")) + 
+  theme(legend.text=element_text(size=12, color="black")) + 
+  theme(axis.text.y= element_text(size=12, color="black")) +
+  theme(plot.title = element_text(size=14)) +
+  theme(axis.text.x= element_text(size=12, color="black")) +
+  theme(axis.ticks.y = element_blank()) +
+  ggtitle("B")
+
+ggsave(file="National_pathway_correlations.jpeg", width=10, height=7.5, units = "in", bg="transparent")
+heatmap.correlation
+dev.off()
+
+```
+
+
+```{r}
+combined <-  plot_grid(MV_plot_final, heatmap.correlation,
+                      align = "hv", ncol = 2)
+
+ggsave(file="Multivariate_plot_combined.jpeg", width=15, height=6, units = "in", bg="transparent")
+combined
+dev.off()
+```
+
+#Figure 3 and Table 1
+
+```{r}
+
+FunEA.selected.genes.tab.filtered.longer.summary <- FunEA.selected.genes.tab.filtered.longer %>% 
+  group_by(Function, class, SampleID) %>%
+  summarise(CPM = sum(CPM))
+
+
+FunEA.selected.genes.tab.filtered.longer.summary.wide <- pivot_wider(FunEA.selected.genes.tab.filtered.longer.summary, names_from = "SampleID", values_from = "CPM")
+
+FunEA.selected.genes.tab.filtered.longer.summary.wide <- FunEA.selected.genes.tab.filtered.longer.summary.wide %>% filter(class != "") %>% filter(!is.na(class))
+
+Class.Abundance <- readRDS("FunEA.byClass.abundances.norm.new.rds")
+
+Class.Abundance <- as.data.frame(Class.Abundance)
+
+Class.Abundance$Class <- rownames(Class.Abundance)
+
+metadata <- read.csv("FunEA.metadata.csv")
+
+```
+
+
+```{r}
+library(dplyr)
+library(purrr)
+library(ggplot2)
+library(FunRed)
+library(philentropy)
+
+# ---- Define a helper function ----
+process_function <- function(fun_name, FunEA_table, Class.Abundance, metadata) {
+  message("Processing: ", fun_name)
+
+  # Subset for this function
+  fun_df <- FunEA_table %>%
+    filter(Function == fun_name) %>%
+    filter(class != "Magnoliopsida") %>%
+    filter(class != "Polypodiopsida") %>%
+    column_to_rownames(var = "class") %>%
+    select(-Function)
+
+  # Normalize by column sums
+  fun_norm <- apply(fun_df, 2, function(x) x / sum(x, na.rm = TRUE))
+  fun_norm <- as.data.frame(fun_norm)
+  fun_norm$Class <- rownames(fun_norm)
+
+
+selected.classes <- unique(fun_norm$Class)
+  
+Class.Abundance.filtered <- Class.Abundance %>% filter(Class %in% selected.classes) %>% select(-Class)
+
+
+Class.Abundance.filtered.norm <- apply(Class.Abundance.filtered, 2, function(x) x / sum(x, na.rm = TRUE))
+Class.Abundance.filtered.norm <- as.data.frame(Class.Abundance.filtered.norm)
+Class.Abundance.filtered.norm$Class <- rownames(Class.Abundance.filtered.norm)
+
+
+  # Get sample columns
+  sample_cols <- setdiff(colnames(fun_norm), "Class")
+
+  # Inner function for each sample
+  process_sample <- function(colname) {
+    test.taxonomy <- Class.Abundance.filtered.norm %>%
+      select(Class, !!sym(colname)) %>%
+      rename(TA = !!sym(colname))
+    
+    test.function <- fun_norm %>%
+      select(Class, !!sym(colname)) %>%
+      rename(FA = !!sym(colname))
+    
+    test.combined <- left_join(test.taxonomy, test.function, by = "Class")
+    test.combined[is.na(test.combined)] <- 0
+    
+    # Run fredundancy
+    res <- fredundancy(test.combined$FA, test.combined$TA, n_reference = nrow(test.combined))
+    res <- data.frame(res)
+    res <- res %>% mutate(Sample = colname, .before = 1)
+    return(res)
+  }
+  
+  # Apply to all samples
+  all_results <- map_dfr(sample_cols, process_sample)
+  
+  # Join metadata
+  all_results <- left_join(all_results, metadata %>% select(Sample, SBTI_Troph, SBTI), by = "Sample") %>%
+    filter(SBTI_Troph != "")
+  
+  # Clean trophic labels
+  all_results$SBTI_Troph[all_results$SBTI_Troph == "Microtrophic"] <- "Oligotrophic"
+  all_results$SBTI_Troph[all_results$SBTI_Troph == "Hypertrophic"] <- "Supertrophic"
+  
+  # Factor ordering
+  all_results$SBTI_Troph <- factor(
+    all_results$SBTI_Troph,
+    levels = c("Oligotrophic", "Mesotrophic", "Eutrophic", "Supertrophic")
+  )
+  
+  # Add function label
+  all_results$Function <- fun_name
+  
+  return(all_results)
+}
+
+# ---- Run across multiple functions ----
+functions_to_run <- c("ANR", "ASR", "Calvin cycle", "DNRA", "DSR", "Denitrification", "Methanogenesis", 
+                      "N fixation", "Nitrification", "P transport", "Respiration", "SOX", "WL", "Photosynthesis", "rTCA cycle")
+
+results_list <- map(functions_to_run, ~process_function(.x, 
+                                                        FunEA.selected.genes.tab.filtered.longer.summary.wide,
+                                                        Class.Abundance,
+                                                        metadata))
+
+# Named list for per-function results
+names(results_list) <- functions_to_run
+
+# Combined results
+all_results_combined <- bind_rows(results_list)
+
+
+all_results_combined$Function = factor(all_results_combined$Function, levels = c("Photosynthesis", "Calvin cycle", "rTCA cycle", "WL", "Respiration", "Methanogenesis", 
+                                                                                       "ANR", "DNRA", "Denitrification", "Nitrification", "N fixation", "P transport",
+                                                                                       "ASR", "DSR", "SOX"))
+
+
+p1 <- ggplot(all_results_combined, aes(x = Function, y=abundance_based)) + geom_boxplot() + theme_classic() + 
+  ylab("Abundance Based Redundancy") + 
+  xlab("Functional Pathway") + 
+  theme(legend.position = "") +
+  theme(strip.text = element_text(size = 12, color="black"),
+        axis.text.x= element_text(size=12, color="black", angle = 65, hjust =1),
+        axis.text.y= element_text(size=12, color="black"),
+        axis.title.y = element_text(size = 12, color="black"),
+        axis.title.x = element_blank(),
+        plot.title = element_text(size = 14)) +
+  ggtitle("B") 
+
+p2 <- ggplot(all_results_combined, aes(x = Function, y=reference_based)) + geom_boxplot() + theme_classic() + 
+  ylab("Taxon Based Redundancy") + 
+  xlab("Functional Pathway") + 
+  theme(legend.position = "") +
+  theme(strip.text = element_text(size = 12, color="black"),
+        axis.text.x= element_text(size=12, color="black", angle = 65, hjust =1),
+        axis.text.y= element_text(size=12, color="black"),
+        axis.title.y = element_text(size = 12, color="black"),
+        axis.title.x = element_blank(),
+        plot.title = element_text(size = 14)) +
+  ggtitle("A")
+
+
+combined <- plot_grid(p2, p1, ncol = 1)
+
+
+ggsave(file="Functional_redundancy_pathway.jpeg", width=10, height=10, units = "in", bg="transparent")
+combined
+dev.off()
+
+kruskal.test(abundance_based ~ Function, data = all_results_combined)
+pairwise.wilcox.test(all_results_combined$abundance_based, all_results_combined$Function,
+                 p.adjust.method = "BH")
+
+kruskal.test(reference_based ~ Function, data = all_results_combined)
+pairwise.wilcox.test(all_results_combined$reference_based, all_results_combined$Function,
+                 p.adjust.method = "BH")
+
+summary <- all_results_combined %>% group_by(Function) %>% summarise(Median.Abund = median(abundance_based),
+                                                                     sd.Abund = sd(abundance_based),
+                                                                     Median.Ref = median(reference_based),
+                                                                     sd.Ref = sd(reference_based))
+
+colnames(summary) <- c("Function", "Median Abundance-based", "SD Abundance-based", "Median Taxonomy-based", "SD Taxonomy-based")
+
+write.csv(summary, "SupplementaryTable3.csv", row.names = F)
+
+
+```
+
+```{r}
+ANR <- all_results_combined %>% filter(Function == "ANR")
+ASR <- all_results_combined %>% filter(Function == "ASR")
+Calvin <- all_results_combined %>% filter(Function == "Calvin cycle")
+DNRA <- all_results_combined %>% filter(Function == "DNRA")
+DSR <- all_results_combined %>% filter(Function == "DSR")
+Denitrification <- all_results_combined %>% filter(Function == "Denitrification")
+Methanogenesis <- all_results_combined %>% filter(Function == "Methanogenesis")
+Nfix <- all_results_combined %>% filter(Function == "N fixation")
+Nitrification <- all_results_combined %>% filter(Function == "Nitrification")
+Ptrans <- all_results_combined %>% filter(Function == "P transport")
+Respiration <- all_results_combined %>% filter(Function == "Respiration")
+SOX <- all_results_combined %>% filter(Function == "SOX")
+WL <- all_results_combined %>% filter(Function == "WL")
+Photosynthesis <- all_results_combined %>% filter(Function == "Photosynthesis")
+rTCA <- all_results_combined %>% filter(Function == "rTCA cycle")
+
+```
+
+```{r}
+
+cor.test(Photosynthesis$abundance_based, Photosynthesis$SBTI, method = "pearson")
+cor.test(Calvin$abundance_based, Calvin$SBTI, method = "pearson")
+cor.test(rTCA$abundance_based, rTCA$SBTI, method = "pearson")
+cor.test(WL$abundance_based, WL$SBTI, method = "pearson")
+cor.test(Respiration$abundance_based, Respiration$SBTI, method = "pearson")
+cor.test(Methanogenesis$abundance_based, Methanogenesis$SBTI, method = "pearson")
+cor.test(ANR$abundance_based, ANR$SBTI, method = "pearson")
+cor.test(DNRA$abundance_based, DNRA$SBTI, method = "pearson")
+cor.test(Denitrification$abundance_based, Denitrification$SBTI, method = "pearson")
+cor.test(Nitrification$abundance_based, Nitrification$SBTI, method = "pearson")
+cor.test(Nfix$abundance_based, Nfix$SBTI, method = "pearson")
+cor.test(Ptrans$abundance_based, Ptrans$SBTI, method = "pearson")
+cor.test(ASR$abundance_based, ASR$SBTI, method = "pearson")
+cor.test(DSR$abundance_based, DSR$SBTI, method = "pearson")
+cor.test(SOX$abundance_based, SOX$SBTI, method = "pearson")
+
+```
+
+```{r}
+cor.test(Photosynthesis$reference_based, Photosynthesis$SBTI, method = "pearson")
+cor.test(Calvin$reference_based, Calvin$SBTI, method = "pearson")
+cor.test(rTCA$reference_based, rTCA$SBTI, method = "pearson")
+cor.test(WL$reference_based, WL$SBTI, method = "pearson")
+cor.test(Respiration$reference_based, Respiration$SBTI, method = "pearson")
+cor.test(Methanogenesis$reference_based, Methanogenesis$SBTI, method = "pearson")
+cor.test(ANR$reference_based, ANR$SBTI, method = "pearson")
+cor.test(DNRA$reference_based, DNRA$SBTI, method = "pearson")
+cor.test(Denitrification$reference_based, Denitrification$SBTI, method = "pearson")
+cor.test(Nitrification$reference_based, Nitrification$SBTI, method = "pearson")
+cor.test(Nfix$reference_based, Nfix$SBTI, method = "pearson")
+cor.test(Ptrans$reference_based, Ptrans$SBTI, method = "pearson")
+cor.test(ASR$reference_based, ASR$SBTI, method = "pearson")
+cor.test(DSR$reference_based, DSR$SBTI, method = "pearson")
+cor.test(SOX$reference_based, SOX$SBTI, method = "pearson")
+```
+
+#Supplementary Figure 1
+
+```{r}
+
+FunEA.selected.genes.tab.filtered.longer.summary <- FunEA.selected.genes.tab.filtered.longer %>% 
+  group_by(Function, phylum, class, SampleID) %>%
+  summarise(CPM = sum(CPM))
+
+
+metadata <- read.csv("FunEA.metadata.csv")
+
+metadata.filtered <- metadata %>% select(Sample, SBTI_Troph, Human.Footprint.Class)
+
+FunEA.selected.genes.tab.filtered.longer.summary <- left_join(FunEA.selected.genes.tab.filtered.longer.summary, metadata.filtered, by = c("SampleID" = "Sample"))
+
+FunEA.selected.genes.tab.filtered.longer.summary <- FunEA.selected.genes.tab.filtered.longer.summary %>%
+  filter(!is.na(class))  %>%
+  filter(class != "")  %>%
+  filter(SBTI_Troph != "")
+
+FunEA.selected.genes.tab.filtered.longer.summary_scaled <- FunEA.selected.genes.tab.filtered.longer.summary %>%
+  group_by(Function, phylum, class, SBTI_Troph) %>%
+  summarise(mean_CPM = mean(CPM),
+            median_CPM = median(CPM)) %>%
+  ungroup() %>%
+  group_by(Function) %>%
+  mutate(
+    mean_CPM_scaled = if (max(mean_CPM) == 0) 0 else (mean_CPM - min(mean_CPM)) / (max(mean_CPM) - min(mean_CPM)),
+    median_CPM_scaled = if (max(median_CPM) == 0) 0 else (median_CPM - min(median_CPM)) / (max(median_CPM) - min(median_CPM))
+  ) %>%
+  ungroup()
+
+```
+
+
+```{r}
+top10_classes <- FunEA.selected.genes.tab.filtered.longer.summary_scaled %>%
+  # Remove "Unclassified_" before ranking
+  filter(!grepl("^Unclassified_", class)) %>%
+  
+  # Summarise by Function × Trophic × class (ensures one row per combo)
+  group_by(Function, SBTI_Troph, class) %>%
+  summarise(median_CPM = median(median_CPM), .groups = "drop") %>%
+  
+  # Select top 10 classes per Function × Trophic
+  group_by(Function, SBTI_Troph) %>%
+  slice_max(order_by = median_CPM, n = 10, with_ties = FALSE) %>%
+  ungroup() %>%
+  filter(class != "Magnoliopsida") %>%
+  filter(class != "Polypodiopsida")
+
+# Now get the unique set of classes across all functions and trophic states
+unique_classes <- unique(top10_classes$class)
+```
+
+
+```{r}
+FunEA.selected.genes.tab.filtered.longer.summary.overall <- 
+  FunEA.selected.genes.tab.filtered.longer.summary %>%
+  filter(class %in% unique_classes)  %>%
+  group_by(Function, class) %>%
+  summarise(mean_CPM = mean(CPM),
+            median_CPM = median(CPM)) %>%
+  ungroup() %>%
+  group_by(Function) %>%
+  mutate(
+    mean_CPM_scaled = if (max(mean_CPM) == 0) 0 else (mean_CPM - min(mean_CPM)) / (max(mean_CPM) - min(mean_CPM)),
+    median_CPM_scaled = if (max(median_CPM) == 0) 0 else (median_CPM - min(median_CPM)) / (max(median_CPM) - min(median_CPM))
+  ) %>%
+  ungroup()
+
+FunEA.selected.genes.tab.filtered.longer.summary.overall$Function <- factor(FunEA.selected.genes.tab.filtered.longer.summary.overall$Function,
+                                                                            levels = c("Photosynthesis", "Calvin cycle", "rTCA cycle", "WL", "Respiration", "Methanogenesis", 
+                                                                                       "ANR", "DNRA", "Denitrification", "Nitrification", "N fixation", "P transport",
+                                                                                       "ASR", "DSR", "SOX"))
+
+FunEA.selected.genes.tab.filtered.longer.summary.overall$class <- factor(FunEA.selected.genes.tab.filtered.longer.summary.overall$class, 
+                      levels = c("Candidatus Bathyarchaeia", "Methanomicrobia", "Candidatus Methanofastidiosia", "Methanobacteria", "Promethearchaeia", "Thermoplasmata",
+"Candidatus Krumholzibacteriia", "Candidatus Limnocylindria", "Candidatus Methylomirabilia", "Terriglobia", "Thermoanaerobaculia", "Vicinamibacteria", "Candidatus Polarisedimenticolia", "Holophagae", "Acidimicrobiia", "Actinomycetes", "Thermoleophilia",
+"Clostridia", "Bacilli", "Bacteroidia", "Chitinophagia", "Flavobacteriia", "Balneolia", "Candidatus Binatia", "Chlamydiia", "Chlorobiia", "Anaerolineae", 
+"Dehalococcoidia", "Caldilineae", "Cyanophyceae", "Gemmatimonadia", "Ignavibacteria", "Myxococcia", "Nitrososphaeria", "Nitrospiria", "Thermodesulfovibrionia", "Phycisphaerae", "Planctomycetia",
+"Alphaproteobacteria", "Betaproteobacteria", "Deltaproteobacteria", "Gammaproteobacteria", "Spirochaetia", "Desulfobacteria", "Desulfomonilia", "Syntrophia", 
+"Syntrophorhabdia", "Desulfuromonadia", "Opitutia", "Spartobacteria", "Verrucomicrobiia",
+"Bacillariophyceae", "Coscinodiscophyceae", "Chlorophyceae", "Trebouxiophyceae", "Euglenida", "Eustigmatophyceae", "Dinophyceae", "Caudoviricetes"))
+
+pathway_heatmap <- ggplot(FunEA.selected.genes.tab.filtered.longer.summary.overall, aes(x = Function, y = class, fill = median_CPM_scaled)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(low = "white", high = "steelblue", name = "Scaled Median \nCPM") +
+  theme_classic() +
+  ggtitle("") +
+  labs(x = "Function",
+       y = "Class",
+       fill = "Presence") +
+ theme(plot.title= element_text(size=20, color="black")) + 
+  theme(axis.title= element_text(size=18, color="black")) + 
+  theme(axis.text.x= element_text(size=16, color="black", angle = 65, hjust =1)) +
+  theme(axis.text.y= element_text(size=16, color="black"))
+
+ggsave(file="pathway_heatmap.TS.jpeg", width=12, height=14, units = "in", bg="transparent")
+pathway_heatmap
+dev.off()
+
+```
+
+#Figure 4
+
+```{r}
+
+FunEA.selected.genes.tab.filtered.longer.summary <- FunEA.selected.genes.tab.filtered.longer %>% 
+  group_by(Function, class, SampleID) %>%
+  summarise(CPM = sum(CPM))
+
+
+metadata <- read.csv("FunEA.metadata.csv")
+
+metadata.filtered <- metadata %>% select(Sample, SBTI_Troph, Human.Footprint.Class)
+
+FunEA.selected.genes.tab.filtered.longer.summary <- left_join(FunEA.selected.genes.tab.filtered.longer.summary, metadata.filtered, by = c("SampleID" = "Sample"))
+
+FunEA.selected.genes.tab.filtered.longer.summary <- FunEA.selected.genes.tab.filtered.longer.summary %>%
+  filter(!is.na(class))  %>%
+  filter(SBTI_Troph != "")
+
+
+
+```
+
+```{r}
+FunEA.selected.genes.tab.filtered.longer.summary.filtered <- FunEA.selected.genes.tab.filtered.longer.summary %>% filter(CPM > 0) %>% select(Function, class) %>% distinct()
+
+
+summary <- FunEA.selected.genes.tab.filtered.longer.summary.filtered %>% group_by(Function) %>% tally()
+
+
+FunEA.selected.genes.tab.filtered.longer.summary.filtered <- FunEA.selected.genes.tab.filtered.longer.summary %>% filter(CPM > 0) %>% select(Function, class, SampleID, SBTI_Troph) %>% distinct()
+
+
+summary <- FunEA.selected.genes.tab.filtered.longer.summary.filtered %>% group_by(Function, SampleID, SBTI_Troph) %>% tally()
+
+
+summary$SBTI_Troph <- factor(summary$SBTI_Troph, levels = c("Microtrophic", "Oligotrophic", "Mesotrophic", "Eutrophic", "Supertrophic", "Hypertrophic"))
+
+summary$SBTI_Troph[summary$SBTI_Troph == "Microtrophic"] <- "Oligotrophic"
+summary$SBTI_Troph[summary$SBTI_Troph == "Hypertrophic"] <- "Supertrophic"
+
+summary$Function = factor(summary$Function, levels = c("Photosynthesis", "Calvin cycle", "rTCA cycle", "WL", "Respiration", "Methanogenesis", 
+                                                                                       "ANR", "DNRA", "Denitrification", "Nitrification", "N fixation", "P transport",
+                                                                                       "ASR", "DSR", "SOX"))
+
+
+classes.boxplot <- ggplot(summary, aes(x = SBTI_Troph, y = n, colour = SBTI_Troph)) + 
+  geom_boxplot() + facet_wrap(~Function, scales = "free_y", ncol=5) + 
+  ylab("# Classes") + 
+  xlab("Trophic State") + 
+  theme_classic() + 
+  scale_colour_manual(values = c("#267f01", "#91e259", "#fec33a", "#d35b18", "#f8260d", "#4E0707"), name = "Trophic level") + 
+  theme(legend.position = "") +
+  theme(strip.text = element_text(size = 20, color="black"),
+        axis.text.x= element_text(size=20, color="black", angle = 65, hjust =1),
+        axis.text.y= element_text(size=20, color="black"),
+        axis.title = element_text(size = 20, color="black")) 
+
+ggsave(file="classes.boxplot.TS.jpeg", width=20, height=14, units = "in", bg="transparent")
+classes.boxplot
+dev.off()
+
+summary.ANR <- summary %>% filter(Function == "ANR")
+kruskal.test(n ~ SBTI_Troph, data = summary.ANR)
+pairwise.wilcox.test(summary.ANR$n, summary.ANR$SBTI_Troph,
+                 p.adjust.method = "BH")
+
+
+summary.ASR <- summary %>% filter(Function == "ASR")
+kruskal.test(n ~ SBTI_Troph, data = summary.ASR)
+pairwise.wilcox.test(summary.ASR$n, summary.ASR$SBTI_Troph,
+                 p.adjust.method = "BH")
+
+
+summary.Calvin <- summary %>% filter(Function == "Calvin cycle")
+kruskal.test(n ~ SBTI_Troph, data = summary.Calvin)
+pairwise.wilcox.test(summary.Calvin$n, summary.Calvin$SBTI_Troph,
+                 p.adjust.method = "BH")
+
+
+summary.DNRA <- summary %>% filter(Function == "DNRA")
+kruskal.test(n ~ SBTI_Troph, data = summary.DNRA)
+pairwise.wilcox.test(summary.DNRA$n, summary.DNRA$SBTI_Troph,
+                 p.adjust.method = "BH")
+
+
+summary.DSR <- summary %>% filter(Function == "DSR")
+kruskal.test(n ~ SBTI_Troph, data = summary.DSR)
+pairwise.wilcox.test(summary.DSR$n, summary.DSR$SBTI_Troph,
+                 p.adjust.method = "BH")
+
+summary.Denitrification <- summary %>% filter(Function == "Denitrification")
+kruskal.test(n ~ SBTI_Troph, data = summary.Denitrification)
+pairwise.wilcox.test(summary.Denitrification$n, summary.Denitrification$SBTI_Troph,
+                 p.adjust.method = "BH")
+
+
+summary.Methanogenesis <- summary %>% filter(Function == "Methanogenesis")
+kruskal.test(n ~ SBTI_Troph, data = summary.Methanogenesis)
+pairwise.wilcox.test(summary.Methanogenesis$n, summary.Methanogenesis$SBTI_Troph,
+                 p.adjust.method = "BH")
+
+
+summary.Nfix <- summary %>% filter(Function == "N fixation")
+kruskal.test(n ~ SBTI_Troph, data = summary.Nfix)
+pairwise.wilcox.test(summary.Nfix$n, summary.Nfix$SBTI_Troph,
+                 p.adjust.method = "BH")
+
+summary.Nitrification <- summary %>% filter(Function == "Nitrification")
+kruskal.test(n ~ SBTI_Troph, data = summary.Nitrification)
+pairwise.wilcox.test(summary.Nitrification$n, summary.Nitrification$SBTI_Troph,
+                 p.adjust.method = "BH")
+
+summary.Pst <- summary %>% filter(Function == "P transport")
+kruskal.test(n ~ SBTI_Troph, data = summary.Pst)
+pairwise.wilcox.test(summary.Pst$n, summary.Pst$SBTI_Troph,
+                 p.adjust.method = "BH")
+
+summary.Respiration <- summary %>% filter(Function == "Respiration")
+kruskal.test(n ~ SBTI_Troph, data = summary.Respiration)
+pairwise.wilcox.test(summary.Respiration$n, summary.Respiration$SBTI_Troph,
+                 p.adjust.method = "BH")
+
+summary.SOX <- summary %>% filter(Function == "SOX")
+kruskal.test(n ~ SBTI_Troph, data = summary.SOX)
+pairwise.wilcox.test(summary.SOX$n, summary.SOX$SBTI_Troph,
+                 p.adjust.method = "BH")
+
+summary.WL <- summary %>% filter(Function == "WL")
+kruskal.test(n ~ SBTI_Troph, data = summary.WL)
+pairwise.wilcox.test(summary.WL$n, summary.WL$SBTI_Troph,
+                 p.adjust.method = "BH")
+
+summary.psb <- summary %>% filter(Function == "Photosynthesis")
+kruskal.test(n ~ SBTI_Troph, data = summary.psb)
+pairwise.wilcox.test(summary.psb$n, summary.psb$SBTI_Troph,
+                 p.adjust.method = "BH")
+
+summary.rTCA <- summary %>% filter(Function == "rTCA cycle")
+kruskal.test(n ~ SBTI_Troph, data = summary.rTCA)
+pairwise.wilcox.test(summary.rTCA$n, summary.rTCA$SBTI_Troph,
+                 p.adjust.method = "BH")
+
+```
+
+
+```{r}
+summary <- FunEA.selected.genes.tab.filtered.longer.summary.filtered %>% select(Function, class) %>% filter(class != "") %>% distinct() %>% group_by(Function) %>% tally()
+
+summary <- FunEA.selected.genes.tab.filtered.longer.summary.filtered %>% group_by(Function, SampleID, SBTI_Troph) %>% tally()
+
+
+summary$SBTI_Troph[summary$SBTI_Troph == "Microtrophic"] <- "Oligotrophic"
+summary$SBTI_Troph[summary$SBTI_Troph == "Hypertrophic"] <- "Supertrophic"
+
+
+summary.class.per.ts <- summary %>% group_by(Function, SBTI_Troph) %>% summarise(median = median(n))
+
+summary.class.per.ts.wide <- pivot_wider(data=summary.class.per.ts, names_from = SBTI_Troph, values_from = median)
+
+write.csv(summary.class.per.ts.wide, "SupplementaryTable4.csv", row.names = F)
+
+```
+
+
+#Figure 5 + Supplementary Figure 2
+
+```{r}
+
+functions_to_run <- c("Calvin cycle", "rTCA cycle",  "Methanogenesis", "P transport", "Denitrification", "Nitrification")
+
+
+process_function <- function(func_name) {
+  # Subset to one function
+  fun_df <- FunEA.selected.genes.tab.filtered.longer.summary.wide %>%
+    filter(Function == func_name) %>%
+    column_to_rownames(var = "class") %>%
+    select(-Function)
+  
+  # Normalize by column sums
+  fun_norm <- apply(fun_df, 2, function(x) x / sum(x, na.rm = TRUE))
+  fun_norm <- as.data.frame(fun_norm)
+  fun_norm$Class <- rownames(fun_norm)
+  
+  # Match classes with Class.Abundance
+  selected.classes <- unique(fun_norm$Class)
+  Class.Abundance.filtered <- Class.Abundance %>%
+    filter(Class %in% selected.classes) %>%
+    select(-Class)
+  
+  # Normalize abundances
+  Class.Abundance.filtered.norm <- apply(Class.Abundance.filtered, 2, function(x) x / sum(x, na.rm = TRUE))
+  Class.Abundance.filtered.norm <- as.data.frame(Class.Abundance.filtered.norm)
+  Class.Abundance.filtered.norm$Class <- rownames(Class.Abundance.filtered.norm)
+  
+  # Reshape long with tidyr
+  fun_norm.long <- fun_norm %>%
+    pivot_longer(-Class, names_to = "variable", values_to = "fun_value")
+  Class.Abundance.filtered.norm.long <- Class.Abundance.filtered.norm %>%
+    pivot_longer(-Class, names_to = "variable", values_to = "tax_value")
+  
+  # Join functional and taxonomic
+  combined <- left_join(fun_norm.long, Class.Abundance.filtered.norm.long,
+                        by = c("Class", "variable"))
+  
+  # Add metadata
+  metadata <- read.csv("FunEA.metadata.csv")
+  combined <- left_join(combined, metadata %>% select(Sample, SBTI_Troph, SBTI),
+                        by = c("variable" = "Sample")) %>%
+    filter(SBTI_Troph != "")
+  
+  # Clean trophic labels
+  combined$SBTI_Troph[combined$SBTI_Troph == "Microtrophic"] <- "Oligotrophic"
+  combined$SBTI_Troph[combined$SBTI_Troph == "Hypertrophic"] <- "Supertrophic"
+  
+  combined <- combined %>%
+  filter(Class != "Magnoliopsida") %>%
+  filter(Class != "Polypodiopsida")
+  
+  
+  top_fun <- combined %>%
+    group_by(Class) %>%
+    summarise(total_fun = median(fun_value, na.rm = TRUE)) %>%
+    arrange(desc(total_fun)) %>%
+    slice_head(n = 5) %>%
+    pull(Class)
+  
+  # 🔑 Top 10 from taxonomy side
+  top_tax <- combined %>%
+    group_by(Class) %>%
+    summarise(total_tax = median(tax_value, na.rm = TRUE)) %>%
+    arrange(desc(total_tax)) %>%
+    slice_head(n = 5) %>%
+    pull(Class)
+  
+  # Union of both sets
+  keep_classes <- union(top_fun, top_tax)
+  
+  combined <- combined %>% filter(Class %in% keep_classes)
+  
+  # Add Function column
+  combined$Function <- func_name
+  
+  return(combined)
+}
+# Run for all functions and bind into one data frame
+all_combined <- map_dfr(functions_to_run, process_function)
+
+
+  # Clean trophic labels
+all_combined$SBTI_Troph[all_combined$SBTI_Troph == "Microtrophic"] <- "Oligotrophic"
+all_combined$SBTI_Troph[all_combined$SBTI_Troph == "Hypertrophic"] <- "Supertrophic"
+  
+  
+all_combined$SBTI_Troph <- factor(all_combined$SBTI_Troph, levels = c("Oligotrophic", "Mesotrophic", "Eutrophic", "Supertrophic"))
+
+all_combined$Function = factor(all_combined$Function, levels = c("Photosynthesis", "Calvin cycle", "rTCA cycle", "WL", "Respiration", "Methanogenesis", 
+                                                                                       "ANR", "DNRA", "Denitrification", "Nitrification", "N fixation", "P transport",
+                                                                                       "ASR", "DSR", "SOX"))
+
+
+good_pal <- c("Actinomycetes" = "#7f1424",          
+              "Alphaproteobacteria" = "#bc3635",    
+              "Bacilli" = "#ffcc28",                 
+              "Betaproteobacteria" = "#fbb15d",     
+              "Cyanophyceae" = "#67bd45",       
+              "Gammaproteobacteria" = "#3398d2",     
+              "Methanomicrobia" = "#35356d",      
+              "Myxococcia" = "#c45b28",             
+              "Planctomycetia" = "#c3ce58",        
+              "Acidimicrobiia" = "#00549e",          
+              "Anaerolineae" = "#175c7d",            
+              "Dehalococcoidia" = "#d383b7",        
+              "Opitutia" = "#a184bd",                
+              "Terriglobia" = "#c3d3c2",              
+              "Thermoplasmata" = "#75a54a",           
+              "Candidatus Bathyarchaeia" = "#ffe0ae",
+              "Methanobacteria" = "#205128",         
+              "Chitinophagia" = "#737f7e",         
+              "Gemmatimonadia" = "#4ba791",          
+              "Vicinamibacteria" = "#9ecce5",      
+              "Candidatus Binatia" = "#702365",       
+              "Nitrospiria" = "#083631",
+              "Bacteroidia"  = "#700616",      
+              "Ignavibacteria" = "#175c7d",
+              "Phycisphaerae" = "#6860a0",
+              "Syntrophorhabdia" = "#004f52",    
+              "Syntrophia" = "#029cbd",          
+              "Chlorophyceae" = "#acd58e",
+              "Dinophyceae" = "#e8b5d4",     
+              "Trebouxiophyceae" = "#f8d3ca",
+              "Bacillariophyceae" = "#f9f7eb",
+              "Eustigmatophyceae" = "#ede655"
+              )
+
+
+
+p1 <- ggplot(all_combined, aes(x = fun_value, y = tax_value, colour=Class)) + 
+  geom_point() + 
+  theme_classic() + 
+  scale_color_manual(values = good_pal) +
+  facet_grid(Function~SBTI_Troph) + 
+  ylab("Community Abundance") + 
+  xlab("Functional Abundance") +
+  theme(strip.text = element_text(size = 16, color="black"),
+        axis.text.x= element_text(size=16, color="black", angle = 65, hjust =1),
+        axis.text.y= element_text(size=16, color="black"),
+        axis.title.y = element_text(size = 16, color="black"),
+        axis.title.x = element_text(size = 16, color="black"),
+        legend.text = element_text(size=16, color="black"),
+        legend.title = element_text(size=16, color="black"),
+        plot.title = element_text(size = 20)) + 
+  guides(colour = guide_legend(ncol = 1,
+                               override.aes = list(size = 4)))
+
+
+ggsave(file="Functional_redundancy_abundance.class.ts.jpeg", width=15, height=12, units = "in", bg="transparent")
+p1
+dev.off()
+```
+
+
+```{r}
+
+functions_to_run <- c("ANR", "ASR",  "DNRA", "DSR", "Respiration",
+                      "N fixation", "SOX", "WL", "Photosynthesis")
+
+
+process_function <- function(func_name) {
+  # Subset to one function
+  fun_df <- FunEA.selected.genes.tab.filtered.longer.summary.wide %>%
+    filter(Function == func_name) %>%
+    column_to_rownames(var = "class") %>%
+    select(-Function)
+  
+  # Normalize by column sums
+  fun_norm <- apply(fun_df, 2, function(x) x / sum(x, na.rm = TRUE))
+  fun_norm <- as.data.frame(fun_norm)
+  fun_norm$Class <- rownames(fun_norm)
+  
+  # Match classes with Class.Abundance
+  selected.classes <- unique(fun_norm$Class)
+  Class.Abundance.filtered <- Class.Abundance %>%
+    filter(Class %in% selected.classes) %>%
+    select(-Class)
+  
+  # Normalize abundances
+  Class.Abundance.filtered.norm <- apply(Class.Abundance.filtered, 2, function(x) x / sum(x, na.rm = TRUE))
+  Class.Abundance.filtered.norm <- as.data.frame(Class.Abundance.filtered.norm)
+  Class.Abundance.filtered.norm$Class <- rownames(Class.Abundance.filtered.norm)
+  
+  # Reshape long with tidyr
+  fun_norm.long <- fun_norm %>%
+    pivot_longer(-Class, names_to = "variable", values_to = "fun_value")
+  Class.Abundance.filtered.norm.long <- Class.Abundance.filtered.norm %>%
+    pivot_longer(-Class, names_to = "variable", values_to = "tax_value")
+  
+  # Join functional and taxonomic
+  combined <- left_join(fun_norm.long, Class.Abundance.filtered.norm.long,
+                        by = c("Class", "variable"))
+  
+  # Add metadata
+  metadata <- read.csv("FunEA.metadata.csv")
+  combined <- left_join(combined, metadata %>% select(Sample, SBTI_Troph, SBTI),
+                        by = c("variable" = "Sample")) %>%
+    filter(SBTI_Troph != "")
+  
+  # Clean trophic labels
+  combined$SBTI_Troph[combined$SBTI_Troph == "Microtrophic"] <- "Oligotrophic"
+  combined$SBTI_Troph[combined$SBTI_Troph == "Hypertrophic"] <- "Supertrophic"
+  
+  combined <- combined %>%
+  filter(Class != "Magnoliopsida") %>%
+  filter(Class != "Polypodiopsida")
+  
+  top_fun <- combined %>%
+    group_by(Class) %>%
+    summarise(total_fun = median(fun_value, na.rm = TRUE)) %>%
+    arrange(desc(total_fun)) %>%
+    slice_head(n = 5) %>%
+    pull(Class)
+  
+  # 🔑 Top 10 from taxonomy side
+  top_tax <- combined %>%
+    group_by(Class) %>%
+    summarise(total_tax = median(tax_value, na.rm = TRUE)) %>%
+    arrange(desc(total_tax)) %>%
+    slice_head(n = 5) %>%
+    pull(Class)
+  
+  # Union of both sets
+  keep_classes <- union(top_fun, top_tax)
+  
+  combined <- combined %>% filter(Class %in% keep_classes)
+  
+  # Add Function column
+  combined$Function <- func_name
+  
+  return(combined)
+}
+# Run for all functions and bind into one data frame
+all_combined <- map_dfr(functions_to_run, process_function)
+
+
+  # Clean trophic labels
+all_combined$SBTI_Troph[all_combined$SBTI_Troph == "Microtrophic"] <- "Oligotrophic"
+all_combined$SBTI_Troph[all_combined$SBTI_Troph == "Hypertrophic"] <- "Supertrophic"
+  
+  
+all_combined$SBTI_Troph <- factor(all_combined$SBTI_Troph, levels = c("Oligotrophic", "Mesotrophic", "Eutrophic", "Supertrophic"))
+
+
+all_combined$Function = factor(all_combined$Function, levels = c("Photosynthesis", "Calvin cycle", "rTCA cycle", "WL", "Respiration", "Methanogenesis", 
+                                                                                       "ANR", "DNRA", "Denitrification", "Nitrification", "N fixation", "P transport",
+                                                                                       "ASR", "DSR", "SOX"))
+
+
+good_pal <- c("Actinomycetes" = "#7f1424",          
+              "Alphaproteobacteria" = "#bc3635",    
+              "Bacilli" = "#ffcc28",                 
+              "Betaproteobacteria" = "#fbb15d",     
+              "Cyanophyceae" = "#67bd45",       
+              "Gammaproteobacteria" = "#3398d2",     
+              "Methanomicrobia" = "#35356d",      
+              "Myxococcia" = "#c45b28",             
+              "Planctomycetia" = "#c3ce58",        
+              "Acidimicrobiia" = "#00549e",          
+              "Anaerolineae" = "#175c7d",            
+              "Dehalococcoidia" = "#d383b7",        
+              "Opitutia" = "#a184bd",                
+              "Terriglobia" = "#c3d3c2",              
+              "Thermoplasmata" = "#75a54a",           
+              "Candidatus Bathyarchaeia" = "#ffe0ae",
+              "Methanobacteria" = "#205128",         
+              "Chitinophagia" = "#737f7e",         
+              "Gemmatimonadia" = "#4ba791",          
+              "Vicinamibacteria" = "#9ecce5",      
+              "Candidatus Binatia" = "#702365",       
+              "Nitrospiria" = "#083631",
+              "Bacteroidia"  = "#700616",      
+              "Ignavibacteria" = "#175c7d",
+              "Phycisphaerae" = "#6860a0",
+              "Syntrophorhabdia" = "#004f52",    
+              "Syntrophia" = "#029cbd",          
+              "Chlorophyceae" = "#acd58e",
+              "Dinophyceae" = "#e8b5d4",     
+              "Trebouxiophyceae" = "#f8d3ca",
+              "Bacillariophyceae" = "#f9f7eb",
+              "Eustigmatophyceae" = "#ede655"
+              )
+
+p1 <- ggplot(all_combined, aes(x = fun_value, y = tax_value, colour=Class)) + 
+  geom_point() + 
+  theme_classic() + 
+  scale_color_manual(values = good_pal) +
+  facet_grid(Function~SBTI_Troph) + 
+  ylab("Community Abundance") + 
+  xlab("Functional Abundance") +
+  theme(strip.text = element_text(size = 16, color="black"),
+        axis.text.x= element_text(size=16, color="black", angle = 65, hjust =1),
+        axis.text.y= element_text(size=16, color="black"),
+        axis.title.y = element_text(size = 16, color="black"),
+        axis.title.x = element_text(size = 16, color="black"),
+        legend.text = element_text(size=16, color="black"),
+        legend.title = element_text(size=16, color="black"),
+        plot.title = element_text(size = 20)) + 
+  guides(colour = guide_legend(ncol = 1,
+                               override.aes = list(size = 4)))
+
+
+
+ggsave(file="Functional_redundancy_abundance.class.ts.supplement.jpeg", width=15, height=16, units = "in", bg="transparent")
+p1
+dev.off()
+```
+
