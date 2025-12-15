@@ -12,6 +12,8 @@ library(phyloseq)
 library(data.table)
 library(ggrepel)
 library(cowplot)
+library(vegan)
+library(gridExtra)
 ```
 
 #KEGG Loading
@@ -79,7 +81,7 @@ metabolism_ps <- prune_taxa(taxa_names(ps) %in% metabolism.ko, ps)
 #Mantel
 
 ```{r}
-Lakes380.ss.subtract.cleaned.merged <- readRDS("~/Documents/Bioinformatics/Lakes380/DNA/SurfaceSediment/SurfaceSed/Lakes380.ss.subtract.cleaned.merged.rds") 
+Lakes380.ss.subtract.cleaned.merged <- readRDS("Lakes380.ss.subtract.cleaned.merged.rds") 
 
 
 tax.clean <- data.frame(tax_table(Lakes380.ss.subtract.cleaned.merged))
