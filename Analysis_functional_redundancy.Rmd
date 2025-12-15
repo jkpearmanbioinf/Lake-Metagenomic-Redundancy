@@ -747,6 +747,12 @@ FunEA.selected.genes.tab.filtered.longer.summary.wide <- pivot_wider(FunEA.selec
 
 FunEA.selected.genes.tab.filtered.longer.summary.wide <- FunEA.selected.genes.tab.filtered.longer.summary.wide %>% filter(class != "") %>% filter(!is.na(class))
 
+Class.Abundance <- readRDS("FunEA.byClass.abundances.norm.new.rds")
+
+Class.Abundance <- as.data.frame(Class.Abundance)
+
+Class.Abundance$Class <- rownames(Class.Abundance)
+
 metadata <- read.csv("FunEA.metadata.csv")
 
 ```
