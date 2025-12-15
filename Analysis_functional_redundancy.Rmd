@@ -80,52 +80,6 @@ metabolism_ps <- prune_taxa(taxa_names(ps) %in% metabolism.ko, ps)
 
 #Mantel
 
-```{r}
-Lakes380.ss.subtract.cleaned.merged <- readRDS("Lakes380.ss.subtract.cleaned.merged.rds") 
-
-
-tax.clean <- data.frame(tax_table(Lakes380.ss.subtract.cleaned.merged))
-
-for (i in 1:6){ tax.clean[,i] <- as.character(tax.clean[,i])}
-
-tax.clean[is.na(tax.clean)] <- ""
-
-for (i in 1:nrow(tax.clean)){
-  if (tax.clean[i,2] == ""){
-    kingdom <- paste("Unclassified_Kingdom_", tax.clean[i,1], sep = "")
-    tax.clean[i, 2:6] <- kingdom
-  } else if (tax.clean[i,3] == ""){
-    phylum <- paste("Unclassified_Phylum_", tax.clean[i,2], sep = "")
-    tax.clean[i, 3:6] <- phylum
-  } else if (tax.clean[i,4] == ""){
-    class <- paste("Unclassified_Class_", tax.clean[i,3], sep = "")
-    tax.clean[i, 4:6] <- class
-  } else if (tax.clean[i,5] == ""){
-    order <- paste("Unclassified_Order_", tax.clean[i,4], sep = "")
-    tax.clean[i, 5:6] <- order
-  } else if (tax.clean[i,6] == ""){
-    tax.clean$Genus[i] <- paste("Unclassified_Family",tax.clean$Family[i], sep = "_")
-  } 
-}
-
-tax_table(Lakes380.ss.subtract.cleaned.merged) <- as.matrix(tax.clean)
-
-
-Lakes380.ss.subtract.cleaned.merged <- subset_taxa(Lakes380.ss.subtract.cleaned.merged, Phylum != "Unclassified_Kingdom_Archaea")
-
-Lakes380.ss.subtract.cleaned.merged <- subset_taxa(Lakes380.ss.subtract.cleaned.merged, Phylum != "Unclassified_Kingdom_Bacteria")
-```
-
-```{r}
-ss <- as.data.frame(sample_sums(Lakes380.ss.subtract.cleaned.merged))
-
-
-Lakes380.ss.subtract.cleaned.merged.pruned <- prune_samples(sample_sums(Lakes380.ss.subtract.cleaned.merged)>12500, Lakes380.ss.subtract.cleaned.merged)
-
-Lakes380.ss.subtract.cleaned.merged.pruned.rare <- rarefy_even_depth(Lakes380.ss.subtract.cleaned.merged.pruned, sample.size = min(sample_sums(Lakes380.ss.subtract.cleaned.merged.pruned)), 
-                                      replace = FALSE, trimOTUs = TRUE, rngseed = 81, verbose = TRUE)
-```
-
 
 ```{r}
 ps.merged <- merge_samples(ps, "Lake.Code")
@@ -146,10 +100,16 @@ sample_data(ps.merged) <- sd
 
 
 ```{r}
-shared_samples <- intersect(sample_names(Lakes380.ss.subtract.cleaned.merged.pruned.rare), sample_names(ps.merged))
+
+
+
+Lakes380.ss.rarefied <- readRDS("Lakes380.ss.rarefied.rds") 
+
+
+shared_samples <- intersect(sample_names(Lakes380.ss.rarefied), sample_names(ps.merged))
 
 # Filter both objects to only include those samples
-ps.taxonomy_common <- prune_samples(shared_samples, Lakes380.ss.subtract.cleaned.merged.pruned.rare)
+ps.taxonomy_common <- prune_samples(shared_samples, Lakes380.ss.rarefied)
 ps.function_common <- prune_samples(shared_samples, ps.merged)
 
 ps.function_common <- prune_taxa(taxa_sums(ps.function_common) > 0, ps.function_common)
